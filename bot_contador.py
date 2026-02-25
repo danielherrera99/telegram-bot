@@ -13,89 +13,138 @@ from telegram.ext import (
     filters,
 )
 
-# ✅ 1) TOKEN: usa variable de entorno si existe, si no usa el texto de abajo
-# En Render te recomiendo usar BOT_TOKEN como Environment Variable.
-TOKEN = os.getenv("BOT_TOKEN", "PEGA_AQUI_TU_TOKEN_DE_BOTFATHER")
+# ====== TOKEN ======
+TOKEN = os.getenv("BOT_TOKEN")  # <- viene de Render env vars
+if not TOKEN:
+    raise RuntimeError("Falta BOT_TOKEN en variables de entorno (Render -> Environment).")
 
-# -----------------------
-# ✅ Mini servidor Flask (para Render)
-# -----------------------
-flask_app = Flask(__name__)
+# ====== DB (PostgreSQL) ======
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-@flask_app.get("/")
-def home():
-    return "OK - Bot activo ✅", 200
+def db_connect():
+    import psycopg2
+    return psycopg2.connect(DATABASE_URL)
 
-def run_web():
-    port = int(os.environ.get("PORT", "10000"))
-    flask_app.run(host="0.0.0.0", port=port)
-
-# -----------------------
-# ✅ Contador por grupo
-# -----------------------
-contador = defaultdict(int)  # contador[(chat_id, user_id)] = mensajes
-nombres = {}                 # nombres[(chat_id, user_id)] = nombre
-fecha_actual = {}            # fecha_actual[chat_id] = date
+def init_db():
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS msg_counts (
+                    chat_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    username TEXT,
+                    day DATE NOT NULL,
+                    messages INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (chat_id, user_id, day)
+                );
+            """)
+        conn.commit()
 
 def hoy():
     return datetime.date.today()
 
-def reset_si_cambia_dia(chat_id):
-    if fecha_actual.get(chat_id) != hoy():
-        keys = [k for k in list(contador.keys()) if k[0] == chat_id]
-        for k in keys:
-            contador.pop(k, None)
-            nombres.pop(k, None)
-        fecha_actual[chat_id] = hoy()
+def day_range_for(mode: str):
+    today = hoy()
+    if mode == "day":
+        start = today
+    elif mode == "week":
+        # lunes de esta semana
+        start = today - datetime.timedelta(days=today.weekday())
+    elif mode == "month":
+        start = today.replace(day=1)
+    else:
+        start = today
+    return start, today
 
+def add_message(chat_id: int, user_id: int, username: str, day: datetime.date):
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO msg_counts (chat_id, user_id, username, day, messages)
+                VALUES (%s, %s, %s, %s, 1)
+                ON CONFLICT (chat_id, user_id, day)
+                DO UPDATE SET messages = msg_counts.messages + 1,
+                              username = EXCLUDED.username;
+            """, (chat_id, user_id, username, day))
+        conn.commit()
+
+def get_top(chat_id: int, mode: str):
+    start, end = day_range_for(mode)
+    with db_connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT user_id, COALESCE(MAX(username), 'Usuario') as username, SUM(messages) as total
+                FROM msg_counts
+                WHERE chat_id = %s AND day BETWEEN %s AND %s
+                GROUP BY user_id
+                ORDER BY total DESC;
+            """, (chat_id, start, end))
+            rows = cur.fetchall()
+    return rows, start, end
+
+# ====== HANDLERS ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("✅ Bot activo. Escribe mensajes y usa /top")
+    await update.message.reply_text("✅ Bot activo. Usa /top /topsemana /topmes")
 
 async def contar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
-
     chat_id = update.effective_chat.id
     user = update.effective_user
+    username = user.first_name or user.username or "Usuario"
+    add_message(chat_id, user.id, username, hoy())
 
-    reset_si_cambia_dia(chat_id)
-
-    key = (chat_id, user.id)
-    contador[key] += 1
-    nombres[key] = user.first_name or "Usuario"
+def format_ranking(title: str, rows):
+    if not rows:
+        return "No hay mensajes en ese periodo."
+    medallas = ["🥇", "🥈", "🥉"]
+    text = f"📊 {title}\n\n"
+    for i, (user_id, username, total) in enumerate(rows, 1):
+        icono = medallas[i-1] if i <= 3 else f"{i}."
+        text += f"{icono} {username} → {total} mensajes\n"
+    return text
 
 async def top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    reset_si_cambia_dia(chat_id)
+    rows, start, end = get_top(chat_id, "day")
+    await update.message.reply_text(format_ranking("Ranking diario (hoy)", rows))
 
-    items = [((c, u), n) for (c, u), n in contador.items() if c == chat_id]
-    if not items:
-        await update.message.reply_text("No hay mensajes hoy en este grupo.")
-        return
+async def topsemana(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    rows, start, end = get_top(chat_id, "week")
+    await update.message.reply_text(format_ranking(f"Ranking semanal ({start} a {end})", rows))
 
-    orden = sorted(items, key=lambda x: x[1], reverse=True)
+async def topmes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    rows, start, end = get_top(chat_id, "month")
+    await update.message.reply_text(format_ranking(f"Ranking mensual ({start} a {end})", rows))
 
-    ranking = "📊 Ranking diario (este grupo):\n\n"
-    medallas = ["🥇", "🥈", "🥉"]
+# ====== FLASK (para Render puerto) ======
+app_flask = Flask(__name__)
 
-    for i, ((c, user_id), mensajes) in enumerate(orden, 1):
-        nombre = nombres.get((c, user_id), "Usuario")
-        icono = medallas[i-1] if i <= 3 else f"{i}."
-        ranking += f"{icono} {nombre} → {mensajes} mensajes\n"
+@app_flask.get("/")
+def home():
+    return "OK", 200
 
-    await update.message.reply_text(ranking)
+def run_flask():
+    port = int(os.getenv("PORT", "10000"))
+    app_flask.run(host="0.0.0.0", port=port)
 
+# ====== MAIN ======
 def main():
-    # ✅ Levanta el servidor web en segundo plano
-    threading.Thread(target=run_web, daemon=True).start()
+    init_db()
 
-    # ✅ Bot
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("top", top))
+    app.add_handler(CommandHandler("topsemana", topsemana))
+    app.add_handler(CommandHandler("topmes", topmes))
     app.add_handler(MessageHandler(~filters.COMMAND, contar))
 
-    print("✅ Web + Bot corriendo en Render...")
+    # Flask en hilo para que Render detecte puerto
+    threading.Thread(target=run_flask, daemon=True).start()
+
+    print("✅ Bot corriendo...")
     app.run_polling()
 
 if __name__ == "__main__":
