@@ -15,7 +15,7 @@ from telegram.ext import (
 
 # ✅ 1) TOKEN: usa variable de entorno si existe, si no usa el texto de abajo
 # En Render te recomiendo usar BOT_TOKEN como Environment Variable.
-TOKEN = os.getenv("BOT_TOKEN", "8713356304:AAHTwOvCH2TRYM_awCvSbv-63Fp_VZsIYIk")
+TOKEN = os.getenv("BOT_TOKEN", "PEGA_AQUI_TU_TOKEN_DE_BOTFATHER")
 
 # -----------------------
 # ✅ Mini servidor Flask (para Render)
