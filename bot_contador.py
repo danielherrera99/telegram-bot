@@ -17,7 +17,7 @@ from telegram.ext import (
 TOKEN = os.getenv("BOT_TOKEN")  # <- viene de Render env vars
 if not TOKEN:
     raise RuntimeError("Falta BOT_TOKEN en variables de entorno (Render -> Environment).")
-
+#prueava
 # ====== DB (PostgreSQL) ======
 DATABASE_URL = os.getenv("DATABASE_URL")
 
