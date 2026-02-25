@@ -1,7 +1,8 @@
 import os
 import threading
+import time
+import asyncio
 import datetime
-from collections import defaultdict
 
 from flask import Flask
 from telegram import Update
@@ -12,14 +13,17 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 # ====== TOKEN ======
-TOKEN = os.getenv("BOT_TOKEN")  # <- viene de Render env vars
+TOKEN = os.getenv("BOT_TOKEN")
 if not TOKEN:
     raise RuntimeError("Falta BOT_TOKEN en variables de entorno (Render -> Environment).")
-#prueava
+
 # ====== DB (PostgreSQL) ======
 DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("Falta DATABASE_URL en variables de entorno (Render -> Environment).")
 
 def db_connect():
     import psycopg2
@@ -40,15 +44,16 @@ def init_db():
             """)
         conn.commit()
 
-def hoy():
-    return datetime.date.today()
+# Usar UTC evita problemas de desfase de fecha entre tu PC / Render / DB
+def hoy_utc():
+    return datetime.datetime.utcnow().date()
 
 def day_range_for(mode: str):
-    today = hoy()
+    today = hoy_utc()
     if mode == "day":
         start = today
     elif mode == "week":
-        # lunes de esta semana
+        # lunes de esta semana (UTC)
         start = today - datetime.timedelta(days=today.weekday())
     elif mode == "month":
         start = today.replace(day=1)
@@ -92,7 +97,9 @@ async def contar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user = update.effective_user
     username = user.first_name or user.username or "Usuario"
-    add_message(chat_id, user.id, username, hoy())
+
+    # Guarda con fecha UTC
+    add_message(chat_id, user.id, username, hoy_utc())
 
 def format_ranking(title: str, rows):
     if not rows:
@@ -130,22 +137,43 @@ def run_flask():
     port = int(os.getenv("PORT", "10000"))
     app_flask.run(host="0.0.0.0", port=port)
 
-# ====== MAIN ======
-def main():
-    init_db()
+# ====== BOT runner con reintentos (evita caídas por timeouts / sleep) ======
+def build_application():
+    request = HTTPXRequest(
+        connect_timeout=30,
+        read_timeout=30,
+        write_timeout=30,
+        pool_timeout=30,
+    )
 
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TOKEN).request(request).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("top", top))
     app.add_handler(CommandHandler("topsemana", topsemana))
     app.add_handler(CommandHandler("topmes", topmes))
     app.add_handler(MessageHandler(~filters.COMMAND, contar))
+    return app
+
+def run_polling_forever():
+    while True:
+        try:
+            app = build_application()
+            print("✅ Bot corriendo (polling)...")
+            # drop_pending_updates evita “cola vieja” al despertar Render
+            app.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            print("❌ Bot se cayó. Reintentando en 5s:", repr(e))
+            time.sleep(5)
+
+# ====== MAIN ======
+def main():
+    init_db()
 
     # Flask en hilo para que Render detecte puerto
     threading.Thread(target=run_flask, daemon=True).start()
 
-    print("✅ Bot corriendo...")
-    app.run_polling()
+    # Polling robusto
+    run_polling_forever()
 
 if __name__ == "__main__":
     main()
