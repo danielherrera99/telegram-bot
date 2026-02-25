@@ -1,7 +1,6 @@
 import os
 import threading
 import time
-import asyncio
 import datetime
 
 from flask import Flask
@@ -44,7 +43,7 @@ def init_db():
             """)
         conn.commit()
 
-# Usar UTC evita problemas de desfase de fecha entre tu PC / Render / DB
+# Usar UTC evita desfases de fecha
 def hoy_utc():
     return datetime.datetime.utcnow().date()
 
@@ -53,8 +52,7 @@ def day_range_for(mode: str):
     if mode == "day":
         start = today
     elif mode == "week":
-        # lunes de esta semana (UTC)
-        start = today - datetime.timedelta(days=today.weekday())
+        start = today - datetime.timedelta(days=today.weekday())  # lunes
     elif mode == "month":
         start = today.replace(day=1)
     else:
@@ -94,11 +92,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def contar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
+
     chat_id = update.effective_chat.id
     user = update.effective_user
     username = user.first_name or user.username or "Usuario"
 
-    # Guarda con fecha UTC
     add_message(chat_id, user.id, username, hoy_utc())
 
 def format_ranking(title: str, rows):
@@ -107,7 +105,7 @@ def format_ranking(title: str, rows):
     medallas = ["🥇", "🥈", "🥉"]
     text = f"📊 {title}\n\n"
     for i, (user_id, username, total) in enumerate(rows, 1):
-        icono = medallas[i-1] if i <= 3 else f"{i}."
+        icono = medallas[i - 1] if i <= 3 else f"{i}."
         text += f"{icono} {username} → {total} mensajes\n"
     return text
 
@@ -137,7 +135,7 @@ def run_flask():
     port = int(os.getenv("PORT", "10000"))
     app_flask.run(host="0.0.0.0", port=port)
 
-# ====== BOT runner con reintentos (evita caídas por timeouts / sleep) ======
+# ====== BOT runner con reintentos ======
 def build_application():
     request = HTTPXRequest(
         connect_timeout=30,
@@ -159,8 +157,13 @@ def run_polling_forever():
         try:
             app = build_application()
             print("✅ Bot corriendo (polling)...")
-            # drop_pending_updates evita “cola vieja” al despertar Render
-            app.run_polling(drop_pending_updates=True)
+
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                close_loop=False,  # ayuda a evitar "event loop is closed" en reinicios
+            )
+
         except Exception as e:
             print("❌ Bot se cayó. Reintentando en 5s:", repr(e))
             time.sleep(5)
